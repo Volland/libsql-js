@@ -170,7 +170,7 @@ impl Database {
         let db: Handle<'_, JsBox<Database>> = cx.this()?;
         let sql = cx.argument::<JsString>(0)?.value(&mut cx);
         trace!("Executing SQL statement (sync): {}", sql);
-        let conn = db.get_conn();
+        let conn = db.get_conn(&mut cx)?;
         let rt = runtime(&mut cx)?;
         let result = rt.block_on(async { conn.lock().await.execute_batch(&sql).await });
         result.or_else(|err| throw_libsql_error(&mut cx, err))?;
@@ -183,7 +183,7 @@ impl Database {
         trace!("Executing SQL statement (async): {}", sql);
         let (deferred, promise) = cx.promise();
         let channel = cx.channel();
-        let conn = db.get_conn();
+        let conn = db.get_conn(&mut cx)?;
         let rt = runtime(&mut cx)?;
         rt.spawn(async move {
             match conn.lock().await.execute_batch(&sql).await {
@@ -205,7 +205,7 @@ impl Database {
         let db: Handle<'_, JsBox<Database>> = cx.this()?;
         let sql = cx.argument::<JsString>(0)?.value(&mut cx);
         trace!("Preparing SQL statement (sync): {}", sql);
-        let conn = db.get_conn();
+        let conn = db.get_conn(&mut cx)?;
         let rt = runtime(&mut cx)?;
         let result = rt.block_on(async { conn.lock().await.prepare(&sql).await });
         let stmt = result.or_else(|err| throw_libsql_error(&mut cx, err))?;
@@ -227,7 +227,7 @@ impl Database {
         let channel = cx.channel();
         let safe_ints = *db.default_safe_integers.borrow();
         let rt = runtime(&mut cx)?;
-        let conn = db.get_conn();
+        let conn = db.get_conn(&mut cx)?;
         rt.spawn(async move {
             match conn.lock().await.prepare(&sql).await {
                 Ok(stmt) => {
@@ -263,9 +263,18 @@ impl Database {
         self.default_safe_integers.replace(toggle);
     }
 
-    fn get_conn(&self) -> Arc<Mutex<libsql::Connection>> {
+    fn get_conn(&self, cx: &mut FunctionContext) -> NeonResult<Arc<Mutex<libsql::Connection>>> {
         let conn = self.conn.borrow();
-        conn.as_ref().unwrap().clone()
+        match conn.as_ref() {
+            Some(conn) => Ok(conn.clone()),
+            None => throw_libsql_error(
+                cx,
+                libsql::Error::SqliteFailure(
+                    libsql::ffi::SQLITE_MISUSE,
+                    "database is closed".into(),
+                ),
+            ),
+        }
     }
 }
 
